@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
+
+# Default proxy URL if not set
+PROXY_URL="${PROXY_URL:-http://127.0.0.1:8080}"
+
 docker run -it \
     --privileged \
     --rm \
+    --name docker-tuxlervpn-server \
     --hostname="$(hostname)" \
     --shm-size="2g" \
+    -e PROXY_URL="$PROXY_URL" \
     --publish="127.0.0.1:1701:1701/tcp" \
     --publish="127.0.0.1:10702:10702/tcp" \
     --publish="127.0.0.1:19703:19703/tcp" \
@@ -20,4 +26,4 @@ docker run -it \
     --publish="127.0.0.1:23326:23326/tcp" \
     --publish="127.0.0.1:23327:23327/tcp" \
     --publish="127.0.0.1:23328:23328/tcp" \
-    docker-tuxlervpn-server:latest /bin/bash
+    docker-tuxlervpn-server:latest
