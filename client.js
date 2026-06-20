@@ -1,4 +1,4 @@
-var WebSocket = require("ws");
+const WebSocket = require("ws");
 
 const PORT_START = 1701;
 const PORT_STEP = 9001;
@@ -7,12 +7,12 @@ const CMD_UNSET_PROXY = "UNSET_PROXY";
 const CMD_GET_LOCAL_PROXY_ADDRESS = "getLocalProxyAddress";
 const CMD_CHANGE_IP_COUNTRY_CITY = "changeIPCountryCity";
 const CMD_CHANGE_IP_COUNTRY_CITY_NEW = "changeIPCountryCityNew";
+
 let ports_web_sockets = [];
 let appConnection;
 let interval_;
 
 function ParseMessage(message, ret) {
-  // console.log("ParseMessage: ", message, ret);
   var matches;
   var rgx = /<message>([\s\S]*)(<details>)([\s\S]*)(<\/details>)<\/message>/gm;
 
@@ -30,8 +30,7 @@ function gotMessageApp(m) {
 }
 
 function NewMessageApp(msg) {
-  console.log("NewMessageApp: ", JSON.stringify(msg));
-  var json;
+  console.log(`[App] New Message: ${JSON.stringify(msg)}`);
 
   switch (msg.message) {
     case "YOUR_IP":
@@ -45,6 +44,7 @@ function NewMessageApp(msg) {
 
 function AppConnection(address, onclose, onsuccess, inst_id) {
   this.address = address;
+  console.log(`[WS] Attempting connection to ${address}`);
   this.ws = new WebSocket(this.address);
   this.onclose_callback = onclose;
   this.onsuccess_callback = onsuccess;
@@ -57,12 +57,13 @@ function AppConnection(address, onclose, onsuccess, inst_id) {
   this.cid = 0;
   this.map = {};
   this.timerID = 0;
-  setTimeout(function () {
+
+  const connectionTimeout = setTimeout(function () {
     if (this_.ws.readyState !== WebSocket.OPEN) {
-      this_.ws.close();
-      this_.ws.onclose();
+      console.log(`[WS] Connection timeout for ${address}`);
+      this_.ws.terminate();
     }
-  }, 7000);
+  }, 10000);
 
   this.sendMessage = function (m, callback) {
     if (typeof callback === "undefined") callback = function (m) {};
@@ -70,33 +71,39 @@ function AppConnection(address, onclose, onsuccess, inst_id) {
     var cid = this_.cid;
     this_.cid++;
     if (typeof callback !== "undefined") this_.map[cid] = callback;
-    if (this_.ws.readyState === WebSocket.OPEN) this_.ws.send(cid + ":" + m);
+    if (this_.ws.readyState === WebSocket.OPEN) {
+      this_.ws.send(cid + ":" + m);
+    } else {
+      console.log(`[WS] Cannot send message, socket not open: ${this_.address}`);
+    }
   };
 
-  this.ws.onopen = function () {
+  this.ws.on("open", function () {
+    clearTimeout(connectionTimeout);
+    console.log(`[WS] Connected to ${this_.address}`);
     this_.ws.send("HELLO TUXLER APP");
-  };
+  });
 
-  this.ws.onmessage = function (evt) {
-    var received_msg = evt.data;
+  this.ws.on("message", function (data) {
+    var received_msg = data.toString();
 
     if (this_.first_msg) {
       this_.first_msg = false;
 
       if (received_msg === "WELCOME TO TUXLER APP") {
+        console.log(`[WS] Welcome received from ${this_.address}`);
         if (typeof this_.onsuccess_callback !== "undefined")
           this_.onsuccess_callback(this_);
-        console.log("this_.first_non_init: ", this_.first_non_init);
       } else {
+        console.log(`[WS] Unexpected welcome message: ${received_msg}`);
         this_.ws.close();
-        this_.ws.onclose();
       }
     } else {
       var idx;
 
       if ((idx = received_msg.indexOf(":")) === -1) {
+        console.log(`[WS] Invalid message format: ${received_msg}`);
         this_.ws.close();
-        this_.ws.onclose();
       } else {
         var cid = parseInt(received_msg.substring(0, idx));
         received_msg = received_msg.substring(idx + 1);
@@ -107,14 +114,14 @@ function AppConnection(address, onclose, onsuccess, inst_id) {
 
           try {
             json = JSON.parse(received_msg);
-          } catch (exc) {
+          } catch (e) {
             exc = true;
           }
 
           if (typeof json === "undefined") exc = true;
           else {
             for (var key in json) {
-              if (json[key] == "undefined") json[key] = undefined;
+              if (json[key] === "undefined") json[key] = undefined;
             }
           }
           this_.map[cid](exc ? received_msg : json);
@@ -124,22 +131,20 @@ function AppConnection(address, onclose, onsuccess, inst_id) {
         }
       }
     }
-    // this_.ws.close() // close instance
-  };
-  this.ws.onerror = function () {
-    console.log(`Cannot connect to ${address}`);
-  };
-  this.ws.onclose = function () {
+  });
+
+  this.ws.on("error", function (err) {
+    console.error(`[WS] Error on ${this_.address}: ${err.message}`);
+  });
+
+  this.ws.on("close", function () {
     if (!this_.was_closed) {
       this_.was_closed = true;
+      console.log(`[WS] Connection closed: ${this_.address}`);
       if (typeof this_.onclose_callback !== "undefined")
         this_.onclose_callback(this_.inst_id);
-
-      try {
-        if (this_.timerID != 0) this_.cancelkeepalive();
-      } catch (exc) {}
     }
-  };
+  });
 }
 
 function startWebSocket() {
@@ -151,14 +156,15 @@ function startWebSocket() {
     current_instances--;
 
     if (current_instances === 0) {
+      console.log("[WS] All connections closed, retrying in 5 seconds...");
       setTimeout(function () {
         startWebSocket();
-      }, 1000);
+      }, 5000);
     }
   };
 
   const onsuccess = function (instance) {
-    console.log("~onsuccess~", instance.address);
+    console.log(`[WS] Initializing App on ${instance.address}`);
     appConnection = instance;
 
     App.setProxy();
@@ -181,28 +187,26 @@ const App = new (class {
   }
 
   _initPorts() {
-    let port = PORT_START;
+    let port = parseInt(process.env.TUXLER_PORT_START) || PORT_START;
+    const step = parseInt(process.env.TUXLER_PORT_STEP) || PORT_STEP;
+    const max_port = 65000;
 
-    while (port < 65000) {
+    while (port < max_port) {
       if (port !== 12347 && port !== 23321 && port !== 23320) {
         ports_web_sockets.push(port);
       }
-
-      port += PORT_STEP;
+      port += step;
     }
-  }
-
-  start() {
-    interval_ = setInterval(task, 5000);
-    task();
+    console.log(`[App] Initialized with ports: ${ports_web_sockets.join(", ")}`);
   }
 
   setProxy() {
-    console.log("~setProxy~: ", CMD_SET_PROXY);
+    console.log(`[App] Sending command: ${CMD_SET_PROXY}`);
     this.sendMessage(CMD_SET_PROXY);
   }
 
   unsetProxy() {
+    console.log(`[App] Sending command: ${CMD_UNSET_PROXY}`);
     this.sendMessage(CMD_UNSET_PROXY);
   }
 
@@ -213,35 +217,11 @@ const App = new (class {
       next_nearby,
       is_residential,
     ]);
-    console.log(
-      "Message To app:",
-      JSON.stringify({
-        name: CMD_CHANGE_IP_COUNTRY_CITY_NEW,
-        args,
-      })
-    );
+    console.log(`[App] Sending command: ${CMD_CHANGE_IP_COUNTRY_CITY_NEW} with args: ${args}`);
     this.sendMessage({
       name: CMD_CHANGE_IP_COUNTRY_CITY_NEW,
       args,
     });
-  }
-
-  changeIPCountryCity(countryISO, city, next_nearby) {
-    const args = JSON.stringify([countryISO, city, next_nearby]);
-    this.sendMessage({
-      name: CMD_CHANGE_IP_COUNTRY_CITY,
-      args,
-    });
-  }
-
-  getLocalProxyAddress(callback) {
-    this.sendMessage(
-      {
-        name: CMD_GET_LOCAL_PROXY_ADDRESS,
-        args: "[]",
-      },
-      callback
-    );
   }
 
   sendMessage(m, callback) {
@@ -249,12 +229,16 @@ const App = new (class {
       callback = function (resp) {};
     }
 
-    let exception = false;
+    if (!appConnection) {
+        console.error("[App] Cannot send message: No active connection");
+        return false;
+    }
 
+    let exception = false;
     try {
       appConnection.sendMessage(m, callback);
     } catch (exc) {
-      console.log(exc);
+      console.error(`[App] Exception in sendMessage: ${exc.message}`);
       exception = true;
     }
 
